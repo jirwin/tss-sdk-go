@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -47,10 +48,10 @@ type SshKeyArgs struct {
 }
 
 // Secret gets the secret with id from the Secret Server of the given tenant
-func (s Server) Secret(id int) (*Secret, error) {
+func (s Server) Secret(ctx context.Context, id int) (*Secret, error) {
 	secret := new(Secret)
 
-	if data, err := s.accessResource("GET", resource, strconv.Itoa(id), nil); err == nil {
+	if data, err := s.accessResource(ctx, "GET", resource, strconv.Itoa(id), nil); err == nil {
 		if err = json.Unmarshal(data, secret); err != nil {
 			log.Printf("[ERROR] error parsing response from /%s/%d: %q", resource, id, data)
 			return nil, err
@@ -65,7 +66,7 @@ func (s Server) Secret(id int) (*Secret, error) {
 		if element.IsFile && element.FileAttachmentID != 0 && element.Filename != "" {
 			path := fmt.Sprintf("%d/fields/%s", id, element.Slug)
 
-			if data, err := s.accessResource("GET", resource, path, nil); err == nil {
+			if data, err := s.accessResource(ctx, "GET", resource, path, nil); err == nil {
 				secret.Fields[index].ItemValue = string(data)
 			} else {
 				return nil, err
@@ -77,9 +78,9 @@ func (s Server) Secret(id int) (*Secret, error) {
 }
 
 // Secret gets the secret with id from the Secret Server of the given tenant
-func (s Server) Secrets(searchText, field string) ([]Secret, error) {
+func (s Server) Secrets(ctx context.Context, searchText, field string) ([]Secret, error) {
 	searchResult := new(SearchResult)
-	if data, err := s.searchResources(resource, searchText, field); err == nil {
+	if data, err := s.searchResources(ctx, resource, searchText, field); err == nil {
 		if err = json.Unmarshal(data, searchResult); err != nil {
 			log.Printf("[ERROR] error parsing response from /%s/%s: %q", resource, searchText, data)
 			return nil, err
@@ -92,7 +93,7 @@ func (s Server) Secrets(searchText, field string) ([]Secret, error) {
 	secrets := make([]Secret, len(searchRecords))
 	for i, record := range searchRecords {
 		//secrets returned in search results are not fully populated
-		secret, err := s.Secret(record.ID)
+		secret, err := s.Secret(ctx, record.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -102,24 +103,24 @@ func (s Server) Secrets(searchText, field string) ([]Secret, error) {
 	return secrets, nil
 }
 
-func (s Server) CreateSecret(secret Secret) (*Secret, error) {
-	return s.writeSecret(secret, "POST", "/")
+func (s Server) CreateSecret(ctx context.Context, secret Secret) (*Secret, error) {
+	return s.writeSecret(ctx, secret, "POST", "/")
 }
 
-func (s Server) UpdateSecret(secret Secret) (*Secret, error) {
+func (s Server) UpdateSecret(ctx context.Context, secret Secret) (*Secret, error) {
 	if secret.SshKeyArgs != nil && (secret.SshKeyArgs.GenerateSshKeys || secret.SshKeyArgs.GeneratePassphrase) {
 		err := fmt.Errorf("[ERROR] SSH key and passphrase generation is only supported during secret creation. "+
 			"Could not update the secret named '%s'", secret.Name)
 		return nil, err
 	}
 	secret.SshKeyArgs = nil
-	return s.writeSecret(secret, "PUT", strconv.Itoa(secret.ID))
+	return s.writeSecret(ctx, secret, "PUT", strconv.Itoa(secret.ID))
 }
 
-func (s Server) writeSecret(secret Secret, method string, path string) (*Secret, error) {
+func (s Server) writeSecret(ctx context.Context, secret Secret, method string, path string) (*Secret, error) {
 	writtenSecret := new(Secret)
 
-	template, err := s.SecretTemplate(secret.SecretTemplateID)
+	template, err := s.SecretTemplate(ctx, secret.SecretTemplateID)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +138,7 @@ func (s Server) writeSecret(secret Secret, method string, path string) (*Secret,
 	fileFields := make([]SecretField, 0)
 	generalFields := make([]SecretField, 0)
 	if secret.SshKeyArgs == nil || !secret.SshKeyArgs.GenerateSshKeys {
-		fileFields, generalFields, err = secret.separateFileFields(template)
+		fileFields, generalFields, err = secret.separateFileFields(ctx, template)
 		if err != nil {
 			return nil, err
 		}
@@ -162,7 +163,7 @@ func (s Server) writeSecret(secret Secret, method string, path string) (*Secret,
 		secret.Fields = make([]SecretField, 0)
 	}
 
-	if data, err := s.accessResource(method, resource, path, secret); err == nil {
+	if data, err := s.accessResource(ctx, method, resource, path, secret); err == nil {
 		if err = json.Unmarshal(data, writtenSecret); err != nil {
 			log.Printf("[ERROR] error parsing response from /%s: %q", resource, data)
 			return nil, err
@@ -171,15 +172,15 @@ func (s Server) writeSecret(secret Secret, method string, path string) (*Secret,
 		return nil, err
 	}
 
-	if err := s.updateFiles(writtenSecret.ID, fileFields); err != nil {
+	if err := s.updateFiles(ctx, writtenSecret.ID, fileFields); err != nil {
 		return nil, err
 	}
 
-	return s.Secret(writtenSecret.ID)
+	return s.Secret(ctx, writtenSecret.ID)
 }
 
-func (s Server) DeleteSecret(id int) error {
-	_, err := s.accessResource("DELETE", resource, strconv.Itoa(id), nil)
+func (s Server) DeleteSecret(ctx context.Context, id int) error {
+	_, err := s.accessResource(ctx, "DELETE", resource, strconv.Itoa(id), nil)
 	return err
 }
 
@@ -196,7 +197,7 @@ func (s Secret) Field(fieldName string) (string, bool) {
 }
 
 // FieldById returns the value of the field with the given field ID
-func (s Secret) FieldById(fieldId int) (string, bool) {
+func (s Secret) FieldById(ctx context.Context, fieldId int) (string, bool) {
 	for _, field := range s.Fields {
 		if fieldId == field.FieldID {
 			log.Printf("[DEBUG] field with name '%s' matches field ID '%d'", field.FieldName, fieldId)
@@ -210,7 +211,7 @@ func (s Secret) FieldById(fieldId int) (string, bool) {
 // updateFiles iterates the list of file fields and if the field's item value is empty,
 // deletes the file, otherwise, uploads the contents of the item value as the new/updated
 // file attachment.
-func (s Server) updateFiles(secretId int, fileFields []SecretField) error {
+func (s Server) updateFiles(ctx context.Context, secretId int, fileFields []SecretField) error {
 	type fieldMod struct {
 		Slug  string
 		Dirty bool
@@ -231,11 +232,11 @@ func (s Server) updateFiles(secretId int, fileFields []SecretField) error {
 		if element.ItemValue == "" {
 			path = fmt.Sprintf("%d/general", secretId)
 			input = secretPatch{Data: fieldMods{SecretFields: []fieldMod{{Slug: element.Slug, Dirty: true, Value: nil}}}}
-			if _, err := s.accessResource("PATCH", resource, path, input); err != nil {
+			if _, err := s.accessResource(ctx, "PATCH", resource, path, input); err != nil {
 				return err
 			}
 		} else {
-			if err := s.uploadFile(secretId, element); err != nil {
+			if err := s.uploadFile(ctx, secretId, element); err != nil {
 				return err
 			}
 		}
@@ -247,7 +248,7 @@ func (s Server) updateFiles(secretId int, fileFields []SecretField) error {
 // fields and non-file fields, using the field definitions in the given template as a
 // guide. File fields are returned as the first output, non file fields as the second
 // output.
-func (s Secret) separateFileFields(template *SecretTemplate) ([]SecretField, []SecretField, error) {
+func (s Secret) separateFileFields(ctx context.Context, template *SecretTemplate) ([]SecretField, []SecretField, error) {
 	var fileFields []SecretField
 	var nonFileFields []SecretField
 
@@ -256,11 +257,11 @@ func (s Secret) separateFileFields(template *SecretTemplate) ([]SecretField, []S
 		var found bool
 		fieldSlug := field.Slug
 		if fieldSlug == "" {
-			if fieldSlug, found = template.FieldIdToSlug(field.FieldID); !found {
+			if fieldSlug, found = template.FieldIdToSlug(ctx, field.FieldID); !found {
 				return nil, nil, fmt.Errorf("[ERROR] field id '%d' is not defined on the secret template with id '%d'", field.FieldID, template.ID)
 			}
 		}
-		if templateField, found = template.GetField(fieldSlug); !found {
+		if templateField, found = template.GetField(ctx, fieldSlug); !found {
 			return nil, nil, fmt.Errorf("[ERROR] field name '%s' is not defined on the secret template with id '%d'", fieldSlug, template.ID)
 		}
 		if templateField.IsFile {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -9,6 +10,8 @@ import (
 )
 
 func main() {
+	ctx := context.Background()
+
 	tss, err := server.New(server.Configuration{
 		Credentials: server.UserCredential{
 			Username: os.Getenv("TSS_USERNAME"),
@@ -21,7 +24,7 @@ func main() {
 		log.Fatal("Error initializing the server configuration", err)
 	}
 
-	s, err := tss.Secret(1)
+	s, err := tss.Secret(ctx, 1)
 
 	if err != nil {
 		log.Fatal("Error calling server.Secret", err)

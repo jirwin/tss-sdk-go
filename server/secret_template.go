@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,10 +26,10 @@ type SecretTemplateField struct {
 }
 
 // SecretTemplate gets the secret template with id from the Secret Server of the given tenant
-func (s Server) SecretTemplate(id int) (*SecretTemplate, error) {
+func (s Server) SecretTemplate(ctx context.Context, id int) (*SecretTemplate, error) {
 	secretTemplate := new(SecretTemplate)
 
-	if data, err := s.accessResource("GET", templateResource, strconv.Itoa(id), nil); err == nil {
+	if data, err := s.accessResource(ctx, "GET", templateResource, strconv.Itoa(id), nil); err == nil {
 		if err = json.Unmarshal(data, secretTemplate); err != nil {
 			log.Printf("[ERROR] error parsing response from /%s/%d: %q", templateResource, id, data)
 			return nil, err
@@ -43,16 +44,16 @@ func (s Server) SecretTemplate(id int) (*SecretTemplate, error) {
 // GeneratePassword generates and returns a password for the secret field identified by the given slug on the given
 // template. The password adheres to the password requirements associated with the field. NOTE: this should only be
 // used with fields whose IsPassword property is true.
-func (s Server) GeneratePassword(slug string, template *SecretTemplate) (string, error) {
+func (s Server) GeneratePassword(ctx context.Context, slug string, template *SecretTemplate) (string, error) {
 
-	fieldId, found := template.FieldSlugToId(slug)
+	fieldId, found := template.FieldSlugToId(ctx, slug)
 
 	if !found {
 		log.Printf("[ERROR] the alias '%s' does not identify a field on the template named '%s'", slug, template.Name)
 	}
 	path := fmt.Sprintf("generate-password/%d", fieldId)
 
-	if data, err := s.accessResource("POST", templateResource, path, nil); err == nil {
+	if data, err := s.accessResource(ctx, "POST", templateResource, path, nil); err == nil {
 		passwordWithQuotes := string(data)
 		return passwordWithQuotes[1 : len(passwordWithQuotes)-1], nil
 	} else {
@@ -62,7 +63,7 @@ func (s Server) GeneratePassword(slug string, template *SecretTemplate) (string,
 
 // FieldIdToSlug returns the shorthand alias (aka: "slug") of the field with the given field ID, and a boolean
 // indicating whether the given ID actually identifies a field for the secret template.
-func (s SecretTemplate) FieldIdToSlug(fieldId int) (string, bool) {
+func (s SecretTemplate) FieldIdToSlug(ctx context.Context, fieldId int) (string, bool) {
 	for _, field := range s.Fields {
 		if fieldId == field.SecretTemplateFieldID {
 			log.Printf("[TRACE] template field with slug '%s' matches the given ID '%d'", field.FieldSlugName, fieldId)
@@ -75,8 +76,8 @@ func (s SecretTemplate) FieldIdToSlug(fieldId int) (string, bool) {
 
 // FieldSlugToId returns the field ID for the given shorthand alias (aka: "slug") of the field, and a boolean indicating
 // whether the given slug actually identifies a field for the secret template.
-func (s SecretTemplate) FieldSlugToId(slug string) (int, bool) {
-	field, found := s.GetField(slug)
+func (s SecretTemplate) FieldSlugToId(ctx context.Context, slug string) (int, bool) {
+	field, found := s.GetField(ctx, slug)
 	if found {
 		return field.SecretTemplateFieldID, found
 	}
@@ -85,7 +86,7 @@ func (s SecretTemplate) FieldSlugToId(slug string) (int, bool) {
 
 // GetField returns the field with the given shorthand alias (aka: "slug"), and a boolean indicating whether the given
 // slug actually identifies a field for the secret template .
-func (s SecretTemplate) GetField(slug string) (*SecretTemplateField, bool) {
+func (s SecretTemplate) GetField(ctx context.Context, slug string) (*SecretTemplateField, bool) {
 	for _, field := range s.Fields {
 		if slug == field.FieldSlugName {
 			log.Printf("[TRACE] template field with ID '%d' matches the given slug '%s'", field.SecretTemplateFieldID, slug)

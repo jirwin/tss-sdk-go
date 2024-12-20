@@ -2,11 +2,11 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"math"
 	"mime/multipart"
@@ -94,7 +94,7 @@ func New(config Configuration, opts ...ServerOption) (*Server, error) {
 }
 
 // urlFor is the URL for the given resource and path
-func (s Server) urlFor(resource, path string) string {
+func (s Server) urlFor(ctx context.Context, resource, path string) string {
 	var baseURL string
 
 	if s.ServerURL == "" {
@@ -117,7 +117,7 @@ func (s Server) urlFor(resource, path string) string {
 	}
 }
 
-func (s Server) urlForSearch(resource, searchText, fieldName string) string {
+func (s Server) urlForSearch(ctx context.Context, resource, searchText, fieldName string) string {
 	var baseURL string
 
 	if s.ServerURL == "" {
@@ -144,7 +144,7 @@ func (s Server) urlForSearch(resource, searchText, fieldName string) string {
 
 // accessResource uses the accessToken to access the API resource.
 // It assumes an appropriate combination of method, resource, path and input.
-func (s Server) accessResource(method, resource, path string, input interface{}) ([]byte, error) {
+func (s Server) accessResource(ctx context.Context, method, resource, path string, input interface{}) ([]byte, error) {
 	switch resource {
 	case "secrets":
 	case "secret-templates":
@@ -166,14 +166,14 @@ func (s Server) accessResource(method, resource, path string, input interface{})
 		}
 	}
 
-	accessToken, err := s.getAccessToken()
+	accessToken, err := s.getAccessToken(ctx)
 
 	if err != nil {
 		log.Print("[ERROR] error getting accessToken:", err)
 		return nil, err
 	}
 
-	req, err := http.NewRequest(method, s.urlFor(resource, path), body)
+	req, err := http.NewRequest(method, s.urlFor(ctx, resource, path), body)
 
 	if err != nil {
 		log.Printf("[ERROR] creating req: %s /%s/%s: %s", method, resource, path, err)
@@ -193,7 +193,7 @@ func (s Server) accessResource(method, resource, path string, input interface{})
 
 	// Check for unauthorized or access denied
 	if statusCode.StatusCode == http.StatusUnauthorized || statusCode.StatusCode == http.StatusForbidden {
-		s.clearTokenCache()
+		s.clearTokenCache(ctx)
 		log.Printf("[ERROR] Token cache cleared due to unauthorized or access denied response.")
 	}
 
@@ -203,7 +203,7 @@ func (s Server) accessResource(method, resource, path string, input interface{})
 // searchResources uses the accessToken to search for API resources.
 // It assumes an appropriate combination of resource, search text.
 // field is optional
-func (s Server) searchResources(resource, searchText, field string) ([]byte, error) {
+func (s Server) searchResources(ctx context.Context, resource, searchText, field string) ([]byte, error) {
 	switch resource {
 	case "secrets":
 	default:
@@ -216,14 +216,14 @@ func (s Server) searchResources(resource, searchText, field string) ([]byte, err
 	method := "GET"
 	body := bytes.NewBuffer([]byte{})
 
-	accessToken, err := s.getAccessToken()
+	accessToken, err := s.getAccessToken(ctx)
 
 	if err != nil {
 		log.Print("[ERROR] error getting accessToken:", err)
 		return nil, err
 	}
 
-	req, err := http.NewRequest(method, s.urlForSearch(resource, searchText, field), body)
+	req, err := http.NewRequest(method, s.urlForSearch(ctx, resource, searchText, field), body)
 
 	if err != nil {
 		log.Printf("[ERROR] creating req: %s /%s/%s/%s: %s", method, resource, searchText, field, err)
@@ -241,13 +241,13 @@ func (s Server) searchResources(resource, searchText, field string) ([]byte, err
 
 // uploadFile uploads the file described in the given fileField to the
 // secret at the given secretId as a multipart/form-data request.
-func (s Server) uploadFile(secretId int, fileField SecretField) error {
+func (s Server) uploadFile(ctx context.Context, secretId int, fileField SecretField) error {
 	log.Printf("[DEBUG] uploading a file to the '%s' field with filename '%s'", fileField.Slug, fileField.Filename)
 	body := bytes.NewBuffer([]byte{})
 	path := fmt.Sprintf("%d/fields/%s", secretId, fileField.Slug)
 
 	// Fetch the access token
-	accessToken, err := s.getAccessToken()
+	accessToken, err := s.getAccessToken(ctx)
 	if err != nil {
 		log.Print("[ERROR] error getting accessToken:", err)
 		return err
@@ -277,7 +277,7 @@ func (s Server) uploadFile(secretId int, fileField SecretField) error {
 	}
 
 	// Make the request
-	req, err := http.NewRequest("PUT", s.urlFor(resource, path), body)
+	req, err := http.NewRequest("PUT", s.urlFor(ctx, resource, path), body)
 	if err != nil {
 		return err
 	}
@@ -289,7 +289,7 @@ func (s Server) uploadFile(secretId int, fileField SecretField) error {
 	return err
 }
 
-func (s *Server) setCacheAccessToken(value string, expiresIn int, baseURL string) error {
+func (s *Server) setCacheAccessToken(ctx context.Context, value string, expiresIn int, baseURL string) error {
 	cache := TokenCache{}
 	cache.AccessToken = value
 	cache.ExpiresIn = (int(time.Now().Unix()) + expiresIn) - int(math.Floor(float64(expiresIn)*0.9))
@@ -299,10 +299,10 @@ func (s *Server) setCacheAccessToken(value string, expiresIn int, baseURL string
 	return nil
 }
 
-func (s *Server) getCacheAccessToken(baseURL string) (string, bool) {
+func (s *Server) getCacheAccessToken(ctx context.Context, baseURL string) (string, bool) {
 	data, ok := os.LookupEnv("SS_AT_" + url.QueryEscape(baseURL))
 	if !ok {
-		s.clearTokenCache()
+		s.clearTokenCache(ctx)
 		return "", ok
 	}
 	cache := TokenCache{}
@@ -315,7 +315,7 @@ func (s *Server) getCacheAccessToken(baseURL string) (string, bool) {
 	return "", false
 }
 
-func (s *Server) clearTokenCache() {
+func (s *Server) clearTokenCache(ctx context.Context) {
 	var baseURL string
 
 	if s.ServerURL == "" {
@@ -329,7 +329,7 @@ func (s *Server) clearTokenCache() {
 
 // getAccessToken gets an OAuth2 Access Grant and returns the token
 // endpoint and get an accessGrant.
-func (s *Server) getAccessToken() (string, error) {
+func (s *Server) getAccessToken(ctx context.Context) (string, error) {
 	if s.Credentials.Token != "" {
 		return s.Credentials.Token, nil
 	}
@@ -341,13 +341,13 @@ func (s *Server) getAccessToken() (string, error) {
 		baseURL = s.ServerURL
 	}
 
-	response, err := s.checkPlatformDetails(baseURL)
+	response, err := s.checkPlatformDetails(ctx, baseURL)
 	if err != nil {
 		log.Print("Error while checking server details:", err)
 		return "", err
 	} else if err == nil && response == "" {
 
-		accessToken, found := s.getCacheAccessToken(baseURL)
+		accessToken, found := s.getCacheAccessToken(ctx, baseURL)
 		if found {
 			return accessToken, nil
 		}
@@ -362,7 +362,7 @@ func (s *Server) getAccessToken() (string, error) {
 		}
 
 		body := strings.NewReader(values.Encode())
-		requestUrl := s.urlFor("token", "")
+		requestUrl := s.urlFor(ctx, "token", "")
 		data, _, err := handleResponse(http.Post(requestUrl, "application/x-www-form-urlencoded", body))
 
 		if err != nil {
@@ -381,7 +381,7 @@ func (s *Server) getAccessToken() (string, error) {
 			log.Print("[ERROR] parsing grant response:", err)
 			return "", err
 		}
-		if err = s.setCacheAccessToken(grant.AccessToken, grant.ExpiresIn, baseURL); err != nil {
+		if err = s.setCacheAccessToken(ctx, grant.AccessToken, grant.ExpiresIn, baseURL); err != nil {
 			log.Print("[ERROR] caching access token:", err)
 			return "", err
 		}
@@ -391,18 +391,18 @@ func (s *Server) getAccessToken() (string, error) {
 	}
 }
 
-func (s *Server) checkPlatformDetails(baseURL string) (string, error) {
+func (s *Server) checkPlatformDetails(ctx context.Context, baseURL string) (string, error) {
 	platformHelthCheckUrl := fmt.Sprintf("%s/%s", strings.Trim(baseURL, "/"), "health")
 	ssHealthCheckUrl := fmt.Sprintf("%s/%s", strings.Trim(baseURL, "/"), "healthcheck.aspx")
 
-	isHealthy := checkJSONResponse(ssHealthCheckUrl)
+	isHealthy := checkJSONResponse(ctx, ssHealthCheckUrl)
 	if isHealthy {
 		return "", nil
 	} else {
-		isHealthy := checkJSONResponse(platformHelthCheckUrl)
+		isHealthy := checkJSONResponse(ctx, platformHelthCheckUrl)
 		if isHealthy {
 
-			accessToken, found := s.getCacheAccessToken(baseURL)
+			accessToken, found := s.getCacheAccessToken(ctx, baseURL)
 			if !found {
 				requestData := url.Values{}
 				requestData.Set("grant_type", "client_credentials")
@@ -431,7 +431,7 @@ func (s *Server) checkPlatformDetails(baseURL string) (string, error) {
 				}
 				accessToken = tokenjsonResponse.AccessToken
 
-				if err = s.setCacheAccessToken(tokenjsonResponse.AccessToken, tokenjsonResponse.ExpiresIn, baseURL); err != nil {
+				if err = s.setCacheAccessToken(ctx, tokenjsonResponse.AccessToken, tokenjsonResponse.ExpiresIn, baseURL); err != nil {
 					log.Print("[ERROR] caching access token:", err)
 					return "", err
 				}
@@ -475,7 +475,7 @@ func (s *Server) checkPlatformDetails(baseURL string) (string, error) {
 	return "", fmt.Errorf("invalid URL")
 }
 
-func checkJSONResponse(url string) bool {
+func checkJSONResponse(ctx context.Context, url string) bool {
 	response, err := http.Get(url)
 	if err != nil {
 		log.Println("Error making GET request:", err)
@@ -483,7 +483,7 @@ func checkJSONResponse(url string) bool {
 	}
 	defer response.Body.Close()
 
-	body, err := ioutil.ReadAll(response.Body)
+	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		log.Println("Error reading response body:", err)
 		return false
