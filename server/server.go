@@ -41,6 +41,15 @@ type Configuration struct {
 // Server provides access to secrets stored in Delinea Secret Server
 type Server struct {
 	Configuration
+	httpClient *http.Client
+}
+
+type ServerOption func(server *Server)
+
+func WithHttpClient(client *http.Client) ServerOption {
+	return func(server *Server) {
+		server.httpClient = client
+	}
 }
 
 type TokenCache struct {
@@ -49,16 +58,14 @@ type TokenCache struct {
 }
 
 // New returns an initialized Secrets object
-func New(config Configuration) (*Server, error) {
+func New(config Configuration, opts ...ServerOption) (*Server, error) {
 	if config.ServerURL == "" && config.Tenant == "" || config.ServerURL != "" && config.Tenant != "" {
 		return nil, fmt.Errorf("either ServerURL of Secret Server/Platform or Tenant of Secret Server Cloud must be set")
 	}
 	if config.TLD == "" {
 		config.TLD = defaultTLD
 	}
-	if config.TLSClientConfig != nil {
-		http.DefaultTransport.(*http.Transport).TLSClientConfig = config.TLSClientConfig
-	}
+
 	if config.apiPathURI == "" {
 		config.apiPathURI = defaultAPIPathURI
 	}
@@ -67,7 +74,23 @@ func New(config Configuration) (*Server, error) {
 		config.tokenPathURI = defaultTokenPathURI
 	}
 	config.tokenPathURI = strings.Trim(config.tokenPathURI, "/")
-	return &Server{config}, nil
+
+	server := &Server{
+		Configuration: config,
+	}
+	for _, opt := range opts {
+		opt(server)
+	}
+
+	if server.httpClient == nil {
+		server.httpClient = &http.Client{}
+	}
+
+	if config.TLSClientConfig != nil {
+		server.httpClient.Transport.(*http.Transport).TLSClientConfig = config.TLSClientConfig
+	}
+
+	return server, nil
 }
 
 // urlFor is the URL for the given resource and path
@@ -166,7 +189,7 @@ func (s Server) accessResource(method, resource, path string, input interface{})
 
 	log.Printf("[DEBUG] calling %s %s", method, req.URL.String())
 
-	data, statusCode, err := handleResponse((&http.Client{}).Do(req))
+	data, statusCode, err := handleResponse(s.httpClient.Do(req))
 
 	// Check for unauthorized or access denied
 	if statusCode.StatusCode == http.StatusUnauthorized || statusCode.StatusCode == http.StatusForbidden {
@@ -211,7 +234,7 @@ func (s Server) searchResources(resource, searchText, field string) ([]byte, err
 
 	log.Printf("[DEBUG] calling %s %s", method, req.URL.String())
 
-	data, _, err := handleResponse((&http.Client{}).Do(req))
+	data, _, err := handleResponse(s.httpClient.Do(req))
 
 	return data, err
 }
@@ -261,7 +284,7 @@ func (s Server) uploadFile(secretId int, fileField SecretField) error {
 	req.Header.Add("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	log.Printf("[DEBUG] uploading file with PUT %s", req.URL.String())
-	_, _, err = handleResponse((&http.Client{}).Do(req))
+	_, _, err = handleResponse(s.httpClient.Do(req))
 
 	return err
 }
@@ -421,7 +444,7 @@ func (s *Server) checkPlatformDetails(baseURL string) (string, error) {
 			}
 			req.Header.Add("Authorization", "Bearer "+accessToken)
 
-			data, _, err := handleResponse((&http.Client{}).Do(req))
+			data, _, err := handleResponse(s.httpClient.Do(req))
 			if err != nil {
 				log.Print("[ERROR] get vaults response error:", err)
 				return "", err
