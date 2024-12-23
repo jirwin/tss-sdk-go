@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"testing"
 )
 
@@ -27,12 +28,14 @@ func TestSecretTemplate(t *testing.T) {
 }
 
 func VerifySecretTemplate(t *testing.T, tss *Server) {
+	ctx := context.Background()
+
 	id := initIntegerFromEnv("TSS_TEMPLATE_ID", t)
 	if id < 0 {
 		return
 	}
 
-	template, err := tss.SecretTemplate(id)
+	template, err := tss.SecretTemplate(ctx, id)
 
 	if err != nil {
 		t.Error("calling secrets.SecretTemplate:", err)
@@ -47,21 +50,21 @@ func VerifySecretTemplate(t *testing.T, tss *Server) {
 		fieldSlug := field.FieldSlugName
 		fieldID := field.SecretTemplateFieldID
 
-		lookupFieldId, foundFieldId := template.FieldSlugToId(fieldSlug)
+		lookupFieldId, foundFieldId := template.FieldSlugToId(ctx, fieldSlug)
 		if !foundFieldId {
 			t.Errorf("expected to find the field slug '%s', but FieldSlugToId reported %t", fieldSlug, foundFieldId)
 		} else if fieldID != lookupFieldId {
 			t.Errorf("expected the field slug '%s' to return a field id of '%d', but '%d' was returned instead", fieldSlug, fieldID, lookupFieldId)
 		}
 
-		lookupSlug, foundSlug := template.FieldIdToSlug(fieldID)
+		lookupSlug, foundSlug := template.FieldIdToSlug(ctx, fieldID)
 		if !foundSlug {
 			t.Errorf("expected to find the field ID '%d', but FieldIdToSlug reported %t", fieldID, foundSlug)
 		} else if fieldSlug != lookupSlug {
 			t.Errorf("expected the field id '%d' to return a field slug of '%s', but '%s' was returned instead", fieldID, fieldSlug, lookupSlug)
 		}
 
-		generatedPassword, err := tss.GeneratePassword(fieldSlug, template)
+		generatedPassword, err := tss.GeneratePassword(ctx, fieldSlug, template)
 		if field.IsPassword {
 			if len(generatedPassword) == 0 || err != nil {
 				t.Errorf("expected to be able to generate a password for the '%s' field; error is '%v'", fieldSlug, err)

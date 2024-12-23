@@ -3,9 +3,14 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
+	"net/http"
+	"path"
 	"strconv"
+
+	"github.com/jirwin/ctxzap"
+	"go.uber.org/zap"
 )
 
 // resource is the HTTP URL path component for the secrets resource
@@ -48,12 +53,17 @@ type SshKeyArgs struct {
 }
 
 // Secret gets the secret with id from the Secret Server of the given tenant
-func (s Server) Secret(ctx context.Context, id int) (*Secret, error) {
+func (s *Server) Secret(ctx context.Context, id int) (*Secret, error) {
+	l := ctxzap.Extract(ctx)
 	secret := new(Secret)
 
-	if data, err := s.accessResource(ctx, "GET", resource, strconv.Itoa(id), nil); err == nil {
+	if data, err := s.accessResource(ctx, http.MethodGet, resource, strconv.Itoa(id), nil); err == nil {
 		if err = json.Unmarshal(data, secret); err != nil {
-			log.Printf("[ERROR] error parsing response from /%s/%d: %q", resource, id, data)
+			l.Error(
+				"error parsing secret response",
+				zap.Int("secret_id", id),
+				zap.String("data", string(data)),
+			)
 			return nil, err
 		}
 	} else {
@@ -64,9 +74,9 @@ func (s Server) Secret(ctx context.Context, id int) (*Secret, error) {
 	// (dummy) ItemValue, so as to make the process transparent to the caller
 	for index, element := range secret.Fields {
 		if element.IsFile && element.FileAttachmentID != 0 && element.Filename != "" {
-			path := fmt.Sprintf("%d/fields/%s", id, element.Slug)
+			resourcePath := path.Join(strconv.Itoa(id), "fields", element.Slug)
 
-			if data, err := s.accessResource(ctx, "GET", resource, path, nil); err == nil {
+			if data, err := s.accessResource(ctx, http.MethodGet, resource, resourcePath, nil); err == nil {
 				secret.Fields[index].ItemValue = string(data)
 			} else {
 				return nil, err
@@ -77,12 +87,14 @@ func (s Server) Secret(ctx context.Context, id int) (*Secret, error) {
 	return secret, nil
 }
 
-// Secret gets the secret with id from the Secret Server of the given tenant
-func (s Server) Secrets(ctx context.Context, searchText, field string) ([]Secret, error) {
+// Secrets gets the secret with id from the Secret Server of the given tenant
+func (s *Server) Secrets(ctx context.Context, searchText, field string) ([]Secret, error) {
+	l := ctxzap.Extract(ctx)
+
 	searchResult := new(SearchResult)
 	if data, err := s.searchResources(ctx, resource, searchText, field); err == nil {
 		if err = json.Unmarshal(data, searchResult); err != nil {
-			log.Printf("[ERROR] error parsing response from /%s/%s: %q", resource, searchText, data)
+			l.Error("error parsing secret response", zap.String("search_text", searchText), zap.String("data", string(data)))
 			return nil, err
 		}
 	} else {
@@ -103,21 +115,23 @@ func (s Server) Secrets(ctx context.Context, searchText, field string) ([]Secret
 	return secrets, nil
 }
 
-func (s Server) CreateSecret(ctx context.Context, secret Secret) (*Secret, error) {
-	return s.writeSecret(ctx, secret, "POST", "/")
+func (s *Server) CreateSecret(ctx context.Context, secret Secret) (*Secret, error) {
+	return s.writeSecret(ctx, secret, http.MethodPost, "/")
 }
 
-func (s Server) UpdateSecret(ctx context.Context, secret Secret) (*Secret, error) {
+func (s *Server) UpdateSecret(ctx context.Context, secret Secret) (*Secret, error) {
+	l := ctxzap.Extract(ctx)
+
 	if secret.SshKeyArgs != nil && (secret.SshKeyArgs.GenerateSshKeys || secret.SshKeyArgs.GeneratePassphrase) {
-		err := fmt.Errorf("[ERROR] SSH key and passphrase generation is only supported during secret creation. "+
-			"Could not update the secret named '%s'", secret.Name)
-		return nil, err
+		l.Error("SSH key and passphrase generation is only supported during secret creation", zap.String("secret_name", secret.Name))
+		return nil, errors.New("SSH key and passphrase generation is only supported during secret creation")
 	}
 	secret.SshKeyArgs = nil
-	return s.writeSecret(ctx, secret, "PUT", strconv.Itoa(secret.ID))
+	return s.writeSecret(ctx, secret, http.MethodPut, strconv.Itoa(secret.ID))
 }
 
-func (s Server) writeSecret(ctx context.Context, secret Secret, method string, path string) (*Secret, error) {
+func (s *Server) writeSecret(ctx context.Context, secret Secret, method string, secretPath string) (*Secret, error) {
+	l := ctxzap.Extract(ctx)
 	writtenSecret := new(Secret)
 
 	template, err := s.SecretTemplate(ctx, secret.SecretTemplateID)
@@ -163,9 +177,9 @@ func (s Server) writeSecret(ctx context.Context, secret Secret, method string, p
 		secret.Fields = make([]SecretField, 0)
 	}
 
-	if data, err := s.accessResource(ctx, method, resource, path, secret); err == nil {
+	if data, err := s.accessResource(ctx, method, resource, secretPath, secret); err == nil {
 		if err = json.Unmarshal(data, writtenSecret); err != nil {
-			log.Printf("[ERROR] error parsing response from /%s: %q", resource, data)
+			l.Error("error parsing secret response", zap.String("secret_path", secretPath), zap.String("data", string(data)))
 			return nil, err
 		}
 	} else {
@@ -179,39 +193,43 @@ func (s Server) writeSecret(ctx context.Context, secret Secret, method string, p
 	return s.Secret(ctx, writtenSecret.ID)
 }
 
-func (s Server) DeleteSecret(ctx context.Context, id int) error {
-	_, err := s.accessResource(ctx, "DELETE", resource, strconv.Itoa(id), nil)
+func (s *Server) DeleteSecret(ctx context.Context, id int) error {
+	_, err := s.accessResource(ctx, http.MethodDelete, resource, strconv.Itoa(id), nil)
 	return err
 }
 
 // Field returns the value of the field with the name fieldName
-func (s Secret) Field(fieldName string) (string, bool) {
+func (s *Secret) Field(ctx context.Context, fieldName string) (string, bool) {
+	l := ctxzap.Extract(ctx)
 	for _, field := range s.Fields {
 		if fieldName == field.FieldName || fieldName == field.Slug {
-			log.Printf("[DEBUG] field with name '%s' matches '%s'", field.FieldName, fieldName)
+			l.Debug("field with name matches", zap.String("field_name", field.FieldName), zap.String("field_slug", field.Slug))
 			return field.ItemValue, true
 		}
 	}
-	log.Printf("[DEBUG] no matching field for name '%s' in secret '%s'", fieldName, s.Name)
+
+	l.Debug("no matching field", zap.String("field_name", fieldName), zap.String("secret_name", s.Name))
 	return "", false
 }
 
 // FieldById returns the value of the field with the given field ID
-func (s Secret) FieldById(ctx context.Context, fieldId int) (string, bool) {
+func (s *Secret) FieldById(ctx context.Context, fieldId int) (string, bool) {
+	l := ctxzap.Extract(ctx)
 	for _, field := range s.Fields {
 		if fieldId == field.FieldID {
-			log.Printf("[DEBUG] field with name '%s' matches field ID '%d'", field.FieldName, fieldId)
+			l.Debug("field with name matches", zap.String("field_name", field.FieldName), zap.Int("field_id", field.FieldID))
 			return field.ItemValue, true
 		}
 	}
-	log.Printf("[DEBUG] no matching field for ID '%d' in secret '%s'", fieldId, s.Name)
+
+	l.Debug("no matching field", zap.Int("field_id", fieldId), zap.String("secret_name", s.Name))
 	return "", false
 }
 
 // updateFiles iterates the list of file fields and if the field's item value is empty,
 // deletes the file, otherwise, uploads the contents of the item value as the new/updated
 // file attachment.
-func (s Server) updateFiles(ctx context.Context, secretId int, fileFields []SecretField) error {
+func (s *Server) updateFiles(ctx context.Context, secretId int, fileFields []SecretField) error {
 	type fieldMod struct {
 		Slug  string
 		Dirty bool
@@ -227,12 +245,12 @@ func (s Server) updateFiles(ctx context.Context, secretId int, fileFields []Secr
 	}
 
 	for _, element := range fileFields {
-		var path string
+		var elementPath string
 		var input interface{}
 		if element.ItemValue == "" {
-			path = fmt.Sprintf("%d/general", secretId)
+			elementPath = path.Join(strconv.Itoa(secretId), "general")
 			input = secretPatch{Data: fieldMods{SecretFields: []fieldMod{{Slug: element.Slug, Dirty: true, Value: nil}}}}
-			if _, err := s.accessResource(ctx, "PATCH", resource, path, input); err != nil {
+			if _, err := s.accessResource(ctx, http.MethodPatch, resource, elementPath, input); err != nil {
 				return err
 			}
 		} else {
@@ -248,7 +266,9 @@ func (s Server) updateFiles(ctx context.Context, secretId int, fileFields []Secr
 // fields and non-file fields, using the field definitions in the given template as a
 // guide. File fields are returned as the first output, non file fields as the second
 // output.
-func (s Secret) separateFileFields(ctx context.Context, template *SecretTemplate) ([]SecretField, []SecretField, error) {
+func (s *Secret) separateFileFields(ctx context.Context, template *SecretTemplate) ([]SecretField, []SecretField, error) {
+	l := ctxzap.Extract(ctx)
+
 	var fileFields []SecretField
 	var nonFileFields []SecretField
 
@@ -258,11 +278,13 @@ func (s Secret) separateFileFields(ctx context.Context, template *SecretTemplate
 		fieldSlug := field.Slug
 		if fieldSlug == "" {
 			if fieldSlug, found = template.FieldIdToSlug(ctx, field.FieldID); !found {
+				l.Error("field id is not defined on the secret template", zap.Int("field_id", field.FieldID), zap.Int("template_id", template.ID))
 				return nil, nil, fmt.Errorf("[ERROR] field id '%d' is not defined on the secret template with id '%d'", field.FieldID, template.ID)
 			}
 		}
 		if templateField, found = template.GetField(ctx, fieldSlug); !found {
-			return nil, nil, fmt.Errorf("[ERROR] field name '%s' is not defined on the secret template with id '%d'", fieldSlug, template.ID)
+			l.Error("field name is not defined on the secret template", zap.String("field_name", fieldSlug), zap.Int("template_id", template.ID))
+			return nil, nil, errors.New("error: field name is not defined on the secret template")
 		}
 		if templateField.IsFile {
 			fileFields = append(fileFields, field)

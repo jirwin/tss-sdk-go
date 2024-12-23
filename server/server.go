@@ -5,17 +5,22 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jirwin/ctxzap"
+	"go.uber.org/zap"
 )
 
 const (
@@ -94,7 +99,7 @@ func New(config Configuration, opts ...ServerOption) (*Server, error) {
 }
 
 // urlFor is the URL for the given resource and path
-func (s Server) urlFor(ctx context.Context, resource, path string) string {
+func (s *Server) urlFor(ctx context.Context, resource, path string) string {
 	var baseURL string
 
 	if s.ServerURL == "" {
@@ -117,7 +122,7 @@ func (s Server) urlFor(ctx context.Context, resource, path string) string {
 	}
 }
 
-func (s Server) urlForSearch(ctx context.Context, resource, searchText, fieldName string) string {
+func (s *Server) urlForSearch(ctx context.Context, resource, searchText, fieldName string) string {
 	var baseURL string
 
 	if s.ServerURL == "" {
@@ -144,15 +149,17 @@ func (s Server) urlForSearch(ctx context.Context, resource, searchText, fieldNam
 
 // accessResource uses the accessToken to access the API resource.
 // It assumes an appropriate combination of method, resource, path and input.
-func (s Server) accessResource(ctx context.Context, method, resource, path string, input interface{}) ([]byte, error) {
+func (s *Server) accessResource(ctx context.Context, method, resource, path string, input interface{}) ([]byte, error) {
+	l := ctxzap.Extract(ctx)
+
 	switch resource {
 	case "secrets":
 	case "secret-templates":
 	default:
 		message := "unknown resource"
 
-		log.Printf("[ERROR] %s: %s", message, resource)
-		return nil, fmt.Errorf(message)
+		l.Error("error accessing resource", zap.String("message", message), zap.String("resource", resource))
+		return nil, errors.New(message)
 	}
 
 	body := bytes.NewBuffer([]byte{})
@@ -161,7 +168,7 @@ func (s Server) accessResource(ctx context.Context, method, resource, path strin
 		if data, err := json.Marshal(input); err == nil {
 			body = bytes.NewBuffer(data)
 		} else {
-			log.Print("[ERROR] marshaling the request body to JSON:", err)
+			l.Error("error marshaling the request body to JSON", zap.Error(err))
 			return nil, err
 		}
 	}
@@ -169,32 +176,38 @@ func (s Server) accessResource(ctx context.Context, method, resource, path strin
 	accessToken, err := s.getAccessToken(ctx)
 
 	if err != nil {
-		log.Print("[ERROR] error getting accessToken:", err)
+		l.Error("error getting accessToken", zap.Error(err))
 		return nil, err
 	}
 
 	req, err := http.NewRequest(method, s.urlFor(ctx, resource, path), body)
 
 	if err != nil {
-		log.Printf("[ERROR] creating req: %s /%s/%s: %s", method, resource, path, err)
+		l.Error(
+			"error creating request",
+			zap.String("method", method),
+			zap.String("resource", resource),
+			zap.String("path", path),
+			zap.Error(err),
+		)
 		return nil, err
 	}
 
 	req.Header.Add("Authorization", "Bearer "+accessToken)
 
 	switch method {
-	case "POST", "PUT", "PATCH":
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	log.Printf("[DEBUG] calling %s %s", method, req.URL.String())
+	l.Debug("calling API", zap.String("method", method), zap.String("url", req.URL.String()))
 
 	data, statusCode, err := handleResponse(s.httpClient.Do(req))
 
 	// Check for unauthorized or access denied
 	if statusCode.StatusCode == http.StatusUnauthorized || statusCode.StatusCode == http.StatusForbidden {
 		s.clearTokenCache(ctx)
-		log.Printf("[ERROR] Token cache cleared due to unauthorized or access denied response.")
+		l.Error("token cache cleared due to unauthorized or access denied response")
 	}
 
 	return data, err
@@ -203,13 +216,14 @@ func (s Server) accessResource(ctx context.Context, method, resource, path strin
 // searchResources uses the accessToken to search for API resources.
 // It assumes an appropriate combination of resource, search text.
 // field is optional
-func (s Server) searchResources(ctx context.Context, resource, searchText, field string) ([]byte, error) {
+func (s *Server) searchResources(ctx context.Context, resource, searchText, field string) ([]byte, error) {
+	l := ctxzap.Extract(ctx)
+
 	switch resource {
 	case "secrets":
 	default:
 		message := "unknown resource"
-
-		log.Printf("[ERROR] %s: %s", message, resource)
+		l.Error("error searching resources", zap.String("message", message), zap.String("resource", resource))
 		return nil, fmt.Errorf(message)
 	}
 
@@ -219,20 +233,27 @@ func (s Server) searchResources(ctx context.Context, resource, searchText, field
 	accessToken, err := s.getAccessToken(ctx)
 
 	if err != nil {
-		log.Print("[ERROR] error getting accessToken:", err)
+		l.Error("error getting accessToken", zap.Error(err))
 		return nil, err
 	}
 
 	req, err := http.NewRequest(method, s.urlForSearch(ctx, resource, searchText, field), body)
 
 	if err != nil {
-		log.Printf("[ERROR] creating req: %s /%s/%s/%s: %s", method, resource, searchText, field, err)
+		l.Error(
+			"error creating search request",
+			zap.String("method", method),
+			zap.String("resource", resource),
+			zap.String("searchText", searchText),
+			zap.String("field", field),
+			zap.Error(err),
+		)
 		return nil, err
 	}
 
 	req.Header.Add("Authorization", "Bearer "+accessToken)
 
-	log.Printf("[DEBUG] calling %s %s", method, req.URL.String())
+	l.Debug("calling API", zap.String("method", method), zap.String("url", req.URL.String()))
 
 	data, _, err := handleResponse(s.httpClient.Do(req))
 
@@ -241,15 +262,17 @@ func (s Server) searchResources(ctx context.Context, resource, searchText, field
 
 // uploadFile uploads the file described in the given fileField to the
 // secret at the given secretId as a multipart/form-data request.
-func (s Server) uploadFile(ctx context.Context, secretId int, fileField SecretField) error {
-	log.Printf("[DEBUG] uploading a file to the '%s' field with filename '%s'", fileField.Slug, fileField.Filename)
+func (s *Server) uploadFile(ctx context.Context, secretId int, fileField SecretField) error {
+	l := ctxzap.Extract(ctx)
+
+	l.Debug("uploading a file to the field", zap.String("slug", fileField.Slug), zap.String("filename", fileField.Filename))
 	body := bytes.NewBuffer([]byte{})
-	path := fmt.Sprintf("%d/fields/%s", secretId, fileField.Slug)
+	uploadPath := path.Join(strconv.Itoa(secretId), "fields", fileField.Slug)
 
 	// Fetch the access token
 	accessToken, err := s.getAccessToken(ctx)
 	if err != nil {
-		log.Print("[ERROR] error getting accessToken:", err)
+		l.Error("error getting accessToken", zap.Error(err))
 		return err
 	}
 
@@ -258,10 +281,10 @@ func (s Server) uploadFile(ctx context.Context, secretId int, fileField SecretFi
 	filename := fileField.Filename
 	if filename == "" {
 		filename = "File.txt"
-		log.Printf("[DEBUG] field has no filename, setting its filename to '%s'", filename)
+		l.Debug("field has no filename, setting its filename", zap.String("filename", filename))
 	} else if match, _ := regexp.Match("[^.]+\\.\\w+$", []byte(filename)); !match {
 		filename = filename + ".txt"
-		log.Printf("[DEBUG] field has no filename extension, setting its filename to '%s'", filename)
+		l.Debug("field has no filename extension, setting its filename", zap.String("filename", filename))
 	}
 	form, err := multipartWriter.CreateFormFile("file", filename)
 	if err != nil {
@@ -277,16 +300,20 @@ func (s Server) uploadFile(ctx context.Context, secretId int, fileField SecretFi
 	}
 
 	// Make the request
-	req, err := http.NewRequest("PUT", s.urlFor(ctx, resource, path), body)
+	req, err := http.NewRequest(http.MethodPut, s.urlFor(ctx, resource, uploadPath), body)
 	if err != nil {
 		return err
 	}
 	req.Header.Add("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
-	log.Printf("[DEBUG] uploading file with PUT %s", req.URL.String())
-	_, _, err = handleResponse(s.httpClient.Do(req))
 
-	return err
+	l.Debug("uploading file with PUT", zap.String("url", req.URL.String()))
+	_, _, err = handleResponse(s.httpClient.Do(req))
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (s *Server) setCacheAccessToken(ctx context.Context, value string, expiresIn int, baseURL string) error {
@@ -330,6 +357,7 @@ func (s *Server) clearTokenCache(ctx context.Context) {
 // getAccessToken gets an OAuth2 Access Grant and returns the token
 // endpoint and get an accessGrant.
 func (s *Server) getAccessToken(ctx context.Context) (string, error) {
+	l := ctxzap.Extract(ctx)
 	if s.Credentials.Token != "" {
 		return s.Credentials.Token, nil
 	}
@@ -343,7 +371,7 @@ func (s *Server) getAccessToken(ctx context.Context) (string, error) {
 
 	response, err := s.checkPlatformDetails(ctx, baseURL)
 	if err != nil {
-		log.Print("Error while checking server details:", err)
+		l.Error("Error while checking platform details:", zap.Error(err))
 		return "", err
 	} else if err == nil && response == "" {
 
@@ -366,7 +394,7 @@ func (s *Server) getAccessToken(ctx context.Context) (string, error) {
 		data, _, err := handleResponse(http.Post(requestUrl, "application/x-www-form-urlencoded", body))
 
 		if err != nil {
-			log.Print("[ERROR] grant response error:", err)
+			l.Error("Error while getting token response:", zap.Error(err))
 			return "", err
 		}
 
@@ -378,11 +406,11 @@ func (s *Server) getAccessToken(ctx context.Context) (string, error) {
 		}{}
 
 		if err = json.Unmarshal(data, &grant); err != nil {
-			log.Print("[ERROR] parsing grant response:", err)
+			l.Error("error parsing grant response", zap.Error(err))
 			return "", err
 		}
 		if err = s.setCacheAccessToken(ctx, grant.AccessToken, grant.ExpiresIn, baseURL); err != nil {
-			log.Print("[ERROR] caching access token:", err)
+			l.Error("error caching access token", zap.Error(err))
 			return "", err
 		}
 		return grant.AccessToken, nil
@@ -392,6 +420,8 @@ func (s *Server) getAccessToken(ctx context.Context) (string, error) {
 }
 
 func (s *Server) checkPlatformDetails(ctx context.Context, baseURL string) (string, error) {
+	l := ctxzap.Extract(ctx)
+
 	platformHelthCheckUrl := fmt.Sprintf("%s/%s", strings.Trim(baseURL, "/"), "health")
 	ssHealthCheckUrl := fmt.Sprintf("%s/%s", strings.Trim(baseURL, "/"), "healthcheck.aspx")
 
@@ -410,9 +440,9 @@ func (s *Server) checkPlatformDetails(ctx context.Context, baseURL string) (stri
 				requestData.Set("client_secret", s.Credentials.Password)
 				requestData.Set("scope", "xpmheadless")
 
-				req, err := http.NewRequest("POST", fmt.Sprintf("%s/%s", strings.Trim(baseURL, "/"), "identity/api/oauth2/token/xpmplatform"), bytes.NewBufferString(requestData.Encode()))
+				req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/%s", strings.Trim(baseURL, "/"), "identity/api/oauth2/token/xpmplatform"), bytes.NewBufferString(requestData.Encode()))
 				if err != nil {
-					log.Print("Error creating HTTP request:", err)
+					l.Error("error creating HTTP request", zap.Error(err))
 					return "", err
 				}
 
@@ -420,39 +450,39 @@ func (s *Server) checkPlatformDetails(ctx context.Context, baseURL string) (stri
 
 				data, _, err := handleResponse((&http.Client{}).Do(req))
 				if err != nil {
-					log.Print("[ERROR] get token response error:", err)
+					l.Error("error while getting token response:", zap.Error(err))
 					return "", err
 				}
 
 				var tokenjsonResponse OAuthTokens
 				if err = json.Unmarshal(data, &tokenjsonResponse); err != nil {
-					log.Print("[ERROR] parsing get token response:", err)
+					l.Error("error parsing get token response:", zap.Error(err))
 					return "", err
 				}
 				accessToken = tokenjsonResponse.AccessToken
 
 				if err = s.setCacheAccessToken(ctx, tokenjsonResponse.AccessToken, tokenjsonResponse.ExpiresIn, baseURL); err != nil {
-					log.Print("[ERROR] caching access token:", err)
+					l.Error("error caching access token:", zap.Error(err))
 					return "", err
 				}
 			}
 
 			req, err := http.NewRequest("GET", fmt.Sprintf("%s/%s", strings.Trim(baseURL, "/"), "vaultbroker/api/vaults"), bytes.NewBuffer([]byte{}))
 			if err != nil {
-				log.Print("Error creating HTTP request:", err)
+				l.Error("error creating HTTP request:", zap.Error(err))
 				return "", err
 			}
 			req.Header.Add("Authorization", "Bearer "+accessToken)
 
 			data, _, err := handleResponse(s.httpClient.Do(req))
 			if err != nil {
-				log.Print("[ERROR] get vaults response error:", err)
+				l.Error("error while getting vaults response:", zap.Error(err))
 				return "", err
 			}
 
 			var vaultJsonResponse VaultsResponseModel
 			if err = json.Unmarshal(data, &vaultJsonResponse); err != nil {
-				log.Print("[ERROR] parsing vaults response:", err)
+				l.Error("error parsing vaults response:", zap.Error(err))
 				return "", err
 			}
 
@@ -476,16 +506,18 @@ func (s *Server) checkPlatformDetails(ctx context.Context, baseURL string) (stri
 }
 
 func checkJSONResponse(ctx context.Context, url string) bool {
+	l := ctxzap.Extract(ctx)
+
 	response, err := http.Get(url)
 	if err != nil {
-		log.Println("Error making GET request:", err)
+		l.Error("error making GET request", zap.Error(err))
 		return false
 	}
 	defer response.Body.Close()
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		log.Println("Error reading response body:", err)
+		l.Error("error reading response body", zap.Error(err))
 		return false
 	}
 

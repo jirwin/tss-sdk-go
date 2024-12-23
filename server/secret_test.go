@@ -1,8 +1,8 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"regexp"
 	"strconv"
@@ -31,12 +31,14 @@ func TestSecret(t *testing.T) {
 }
 
 func GetSecret(t *testing.T, tss *Server) {
+	ctx := context.Background()
+
 	id := initIntegerFromEnv("TSS_SECRET_ID", t)
 	if id < 0 {
 		return
 	}
 
-	s, err := tss.Secret(id)
+	s, err := tss.Secret(ctx, id)
 
 	if err != nil {
 		t.Error("calling server.Secret:", err)
@@ -47,11 +49,11 @@ func GetSecret(t *testing.T, tss *Server) {
 		t.Error("secret data is nil")
 	}
 
-	if _, ok := s.Field("password"); !ok {
+	if _, ok := s.Field(ctx, "password"); !ok {
 		t.Error("no password field")
 	}
 
-	if _, ok := s.Field("nonexistent"); ok {
+	if _, ok := s.Field(ctx, "nonexistent"); ok {
 		t.Error("s.Field says nonexistent field exists")
 	}
 }
@@ -79,6 +81,8 @@ func TestSecretCRUD(t *testing.T) {
 }
 
 func SecretCRUD(t *testing.T, tss *Server) {
+	ctx := context.Background()
+
 	siteId := initIntegerFromEnv("TSS_SITE_ID", t)
 	folderId := initIntegerFromEnv("TSS_FOLDER_ID", t)
 	templateId := initIntegerFromEnv("TSS_TEMPLATE_ID", t)
@@ -95,7 +99,7 @@ func SecretCRUD(t *testing.T, tss *Server) {
 	}
 
 	// Retrieve the template and find the first password field
-	refSecretTemplate, err := tss.SecretTemplate(templateId)
+	refSecretTemplate, err := tss.SecretTemplate(ctx, templateId)
 	if err != nil {
 		t.Error("calling server.SecretTemplate:", err)
 		return
@@ -122,7 +126,7 @@ func SecretCRUD(t *testing.T, tss *Server) {
 	refSecret.Fields = make([]SecretField, 1)
 	refSecret.Fields[0].FieldID = fieldId
 	refSecret.Fields[0].ItemValue = password
-	sc, err := tss.CreateSecret(*refSecret)
+	sc, err := tss.CreateSecret(ctx, *refSecret)
 	if err != nil {
 		t.Error("calling server.CreateSecret:", err)
 		return
@@ -140,7 +144,7 @@ func SecretCRUD(t *testing.T, tss *Server) {
 	if !validate("created secret site id", siteId, sc.SiteID, t) {
 		return
 	}
-	createdPassword, matched := sc.FieldById(fieldId)
+	createdPassword, matched := sc.FieldById(ctx, fieldId)
 	if !matched {
 		t.Errorf("created secret does not have a password field with the given field id '%d':", fieldId)
 		return
@@ -150,7 +154,7 @@ func SecretCRUD(t *testing.T, tss *Server) {
 	}
 
 	// Test the read of the new secret
-	sr, err := tss.Secret(sc.ID)
+	sr, err := tss.Secret(ctx, sc.ID)
 	if err != nil {
 		t.Error("calling server.Secret:", err)
 		return
@@ -168,7 +172,7 @@ func SecretCRUD(t *testing.T, tss *Server) {
 	if !validate("read secret site id", siteId, sr.SiteID, t) {
 		return
 	}
-	readPassword, matched := sr.FieldById(fieldId)
+	readPassword, matched := sr.FieldById(ctx, fieldId)
 	if !matched {
 		t.Errorf("read secret does not have a password field with the given field id '%d':", fieldId)
 		return
@@ -181,7 +185,7 @@ func SecretCRUD(t *testing.T, tss *Server) {
 	newPassword := password + "updated"
 	refSecret.ID = sc.ID
 	refSecret.Fields[0].ItemValue = newPassword
-	su, err := tss.UpdateSecret(*refSecret)
+	su, err := tss.UpdateSecret(ctx, *refSecret)
 	if err != nil {
 		t.Error("calling server.UpdateSecret:", err)
 		return
@@ -199,7 +203,7 @@ func SecretCRUD(t *testing.T, tss *Server) {
 	if !validate("updated secret site id", siteId, su.SiteID, t) {
 		return
 	}
-	updatedPassword, matched := su.FieldById(fieldId)
+	updatedPassword, matched := su.FieldById(ctx, fieldId)
 	if !matched {
 		t.Errorf("updated secret does not have a password field with the given field id '%d':", fieldId)
 		return
@@ -209,14 +213,14 @@ func SecretCRUD(t *testing.T, tss *Server) {
 	}
 
 	// Test the deletion of the new secret
-	err = tss.DeleteSecret(sc.ID)
+	err = tss.DeleteSecret(ctx, sc.ID)
 	if err != nil {
 		t.Error("calling server.DeleteSecret:", err)
 		return
 	}
 
 	// Test read of the deleted secret fails
-	s, err := tss.Secret(sc.ID)
+	s, err := tss.Secret(ctx, sc.ID)
 	if s != nil && s.Active {
 		t.Errorf("deleted secret with id '%d' returned from read", sc.ID)
 	}
@@ -246,6 +250,8 @@ func TestSecretCRUDForSSHTemplate(t *testing.T) {
 }
 
 func SecretCRUDForSSHTemplate(t *testing.T, tss *Server) {
+	ctx := context.Background()
+
 	siteId := initIntegerFromEnv("TSS_SITE_ID", t)
 	folderId := initIntegerFromEnv("TSS_FOLDER_ID", t)
 	templateId := initIntegerFromEnv("TSS_SSH_KEY_TEMPLATE_ID", t)
@@ -273,7 +279,7 @@ func SecretCRUDForSSHTemplate(t *testing.T, tss *Server) {
 	refSecret.Fields = make([]SecretField, 7)
 
 	// Make a best-effort attempt to find the fields related to SSH key generation
-	refSecretTemplate, err := tss.SecretTemplate(templateId)
+	refSecretTemplate, err := tss.SecretTemplate(ctx, templateId)
 	if err != nil {
 		t.Error("calling server.SecretTemplate:", err)
 		return
@@ -337,7 +343,7 @@ func SecretCRUDForSSHTemplate(t *testing.T, tss *Server) {
 	refSecret.Fields = refSecret.Fields[0:idx]
 
 	// Test creation of a new secret
-	sc, err := tss.CreateSecret(*refSecret)
+	sc, err := tss.CreateSecret(ctx, *refSecret)
 	if err != nil {
 		t.Error("calling server.CreateSecret:", err)
 		return
@@ -420,7 +426,7 @@ func SecretCRUDForSSHTemplate(t *testing.T, tss *Server) {
 	}
 
 	// Test the read of the new secret
-	sr, err := tss.Secret(sc.ID)
+	sr, err := tss.Secret(ctx, sc.ID)
 	if err != nil {
 		t.Error("calling server.Secret:", err)
 		return
@@ -508,7 +514,7 @@ func SecretCRUDForSSHTemplate(t *testing.T, tss *Server) {
 	if publicKeyIdx > 0 {
 		sc.Fields[publicKeyIdx].Filename = "New Filename.txt"
 	}
-	su, err := tss.UpdateSecret(*sc)
+	su, err := tss.UpdateSecret(ctx, *sc)
 	if err != nil {
 		t.Error("calling server.UpdateSecret:", err)
 		return
@@ -591,14 +597,14 @@ func SecretCRUDForSSHTemplate(t *testing.T, tss *Server) {
 	}
 
 	// Test the deletion of the new secret
-	err = tss.DeleteSecret(sc.ID)
+	err = tss.DeleteSecret(ctx, sc.ID)
 	if err != nil {
 		t.Error("calling server.DeleteSecret:", err)
 		return
 	}
 
 	// Test read of the deleted secret fails
-	s, err := tss.Secret(sc.ID)
+	s, err := tss.Secret(ctx, sc.ID)
 	if s != nil && s.Active {
 		t.Errorf("deleted secret with id '%d' returned from read", sc.ID)
 	}
@@ -626,8 +632,9 @@ func TestSearch(t *testing.T) {
 }
 
 func Search(t *testing.T, tss *Server) {
+	ctx := context.Background()
 
-	s, err := tss.Secrets(os.Getenv("TSS_SEARCH_TEXT"), os.Getenv("TSS_SEARCH_FIELD"))
+	s, err := tss.Secrets(ctx, os.Getenv("TSS_SEARCH_TEXT"), os.Getenv("TSS_SEARCH_FIELD"))
 
 	if err != nil {
 		t.Error("calling server.Secret:", err)
@@ -638,7 +645,7 @@ func Search(t *testing.T, tss *Server) {
 		t.Error("secret data is nil")
 	}
 
-	if _, ok := s[0].Field("password"); !ok {
+	if _, ok := s[0].Field(ctx, "password"); !ok {
 		t.Error("no password field")
 	}
 }
@@ -665,8 +672,9 @@ func TestSearchWithoutField(t *testing.T) {
 }
 
 func SearchWithoutField(t *testing.T, tss *Server) {
+	ctx := context.Background()
 
-	s, err := tss.Secrets(os.Getenv("TSS_SEARCH_TEXT"), "")
+	s, err := tss.Secrets(ctx, os.Getenv("TSS_SEARCH_TEXT"), "")
 
 	if err != nil {
 		t.Error("calling server.Secret:", err)
@@ -677,14 +685,14 @@ func SearchWithoutField(t *testing.T, tss *Server) {
 		t.Error("secret data is nil")
 	}
 
-	if _, ok := s[0].Field("password"); !ok {
+	if _, ok := s[0].Field(ctx, "password"); !ok {
 		t.Error("no password field")
 	}
 }
 func initServer() (*Server, error) {
 	var config *Configuration
 
-	if cj, err := ioutil.ReadFile("../test_config.json"); err == nil {
+	if cj, err := os.ReadFile("../test_config.json"); err == nil {
 		config = new(Configuration)
 
 		json.Unmarshal(cj, &config)
@@ -705,7 +713,7 @@ func initServer() (*Server, error) {
 func initPlatformServer() (*Server, error) {
 	var config *Configuration
 
-	if cj, err := ioutil.ReadFile("../test_config.json"); err == nil {
+	if cj, err := os.ReadFile("../test_config.json"); err == nil {
 		config = new(Configuration)
 
 		json.Unmarshal(cj, &config)

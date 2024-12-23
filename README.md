@@ -102,7 +102,7 @@ The tests populate a `Configuration` from JSON:
 ```golang
 config := new(Configuration)
 
-if cj, err := ioutil.ReadFile("../test_config.json"); err == nil {
+if cj, err := os.ReadFile("../test_config.json"); err == nil {
     json.Unmarshal(cj, &config)
 }
 
