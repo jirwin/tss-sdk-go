@@ -7,13 +7,13 @@ import (
 	"github.com/jirwin/ctxzap"
 	"go.uber.org/zap"
 
-	"github.com/DelineaXPM/tss-sdk-go/v2/server"
+	"github.com/DelineaXPM/tss-sdk-go/v2/client"
 )
 
 func initLogging(ctx context.Context) context.Context {
 	_ = os.Stdout.Sync()
 
-	l := zap.Must(zap.NewProduction())
+	l := zap.Must(zap.NewDevelopment())
 	zap.ReplaceGlobals(l)
 
 	return ctxzap.ToContext(ctx, l)
@@ -23,27 +23,29 @@ func main() {
 	ctx := initLogging(context.Background())
 	l := ctxzap.Extract(ctx)
 
-	tss, err := server.New(server.Configuration{
-		Credentials: server.UserCredential{
-			Username: os.Getenv("TSS_USERNAME"),
-			Password: os.Getenv("TSS_PASSWORD"),
-		},
-		Tenant: os.Getenv("TSS_TENANT"),
-	})
-
+	tss, err := client.New(os.Getenv("TSS_URL"), nil, client.WithPasswordAuth(os.Getenv("TSS_USERNAME"), os.Getenv("TSS_PASSWORD")))
 	if err != nil {
-		l.Error("Error initializing the server configuration", zap.Error(err))
+		l.Error("Error initializing the client", zap.Error(err))
 		os.Exit(1)
 	}
 
 	s, err := tss.Secret(ctx, 1)
-
 	if err != nil {
-		l.Error("Error calling server.Secret", zap.Error(err))
+		l.Error("Error calling tss.Secret", zap.Error(err))
 		os.Exit(1)
 	}
 
 	if pw, ok := s.Field(ctx, "password"); ok {
+		l.Info("the password was retrieved successfully", zap.String("password", pw))
+	}
+
+	s1, err := tss.Secret(ctx, 1)
+	if err != nil {
+		l.Error("Error calling tss.Secret", zap.Error(err))
+		os.Exit(1)
+	}
+
+	if pw, ok := s1.Field(ctx, "password"); ok {
 		l.Info("the password was retrieved successfully", zap.String("password", pw))
 	}
 }
