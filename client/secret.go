@@ -9,7 +9,7 @@ import (
 	"github.com/jirwin/ctxzap"
 	"go.uber.org/zap"
 
-	"github.com/DelineaXPM/tss-sdk-go/v2/secrets"
+	"github.com/jirwin/tss-sdk-go/secrets"
 )
 
 const (

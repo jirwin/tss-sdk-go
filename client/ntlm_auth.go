@@ -6,12 +6,10 @@ type ntlmAuthenticator struct {
 	originalTransport http.RoundTripper
 }
 
-func (n *ntlmAuthenticator) RoundTrip(request *http.Request) (*http.Response, error) {
-	//TODO implement me
-	panic("implement me")
-}
-
 func newNTLMRoundTripper(originalTransport http.RoundTripper) *ntlmAuthenticator {
+	if originalTransport == nil {
+		originalTransport = http.DefaultTransport
+	}
 	return &ntlmAuthenticator{
 		originalTransport: originalTransport,
 	}

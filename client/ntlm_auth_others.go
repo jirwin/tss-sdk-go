@@ -4,6 +4,6 @@ package client
 
 import "net/http"
 
-func (n *ntlmAuthenticator) AuthenticateRequest(req *http.Request) error {
+func (n *ntlmAuthenticator) RoundTrip(req *http.Request) (*http.Response, error) {
 	panic("NTLM authentication is only implemented on Windows")
 }

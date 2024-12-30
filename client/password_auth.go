@@ -92,10 +92,6 @@ func (p *passwordAuth) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
-	if p.originalTransport == nil {
-		return http.DefaultTransport.RoundTrip(req)
-	}
-
 	return p.originalTransport.RoundTrip(req)
 }
 

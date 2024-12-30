@@ -7,7 +7,7 @@ import (
 	"github.com/jirwin/ctxzap"
 	"go.uber.org/zap"
 
-	"github.com/DelineaXPM/tss-sdk-go/v2/client"
+	"github.com/jirwin/tss-sdk-go/client"
 )
 
 func initLogging(ctx context.Context) context.Context {
